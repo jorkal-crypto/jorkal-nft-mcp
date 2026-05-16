@@ -1,0 +1,9 @@
+{
+  "name": "jorkal-nft-api",
+  "description": "MCP server for Solana NFT market data — floor prices, listings, stats, wallet holdings via Magic Eden. Paid with x402 micropayments (USDC on Base).",
+  "homepage": "https://jorkal-nft-mcp.vercel.app",
+  "mcp": {
+    "type": "remote",
+    "url": "https://jorkal-nft-mcp.vercel.app/mcp"
+  }
+}
