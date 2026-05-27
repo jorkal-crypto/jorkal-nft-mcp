@@ -304,6 +304,88 @@ async function callTool(name, args, paymentHeader) {
 
 const sessions = new Map();
 
+// ── Shared message handler (used by both HTTP and stdio transports) ───────────
+
+async function handleMcpMessage(msg, paymentHeader) {
+  const { jsonrpc: ver, id, method, params } = msg;
+
+  if (ver !== '2.0') {
+    return jsonrpcError(id, -32600, 'Invalid JSON-RPC version');
+  }
+
+  try {
+    switch (method) {
+      case 'initialize': {
+        const sessionId = crypto.randomUUID();
+        sessions.set(sessionId, { created: Date.now() });
+        return jsonrpc(id, {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: SERVER_INFO,
+        });
+      }
+
+      case 'tools/list': {
+        return jsonrpc(id, {
+          tools: TOOLS.map(({ _price, ...t }) => t),
+        });
+      }
+
+      case 'tools/call': {
+        const { name, arguments: args } = params;
+        const metaPayment = params._meta?.payment;
+        const effectivePayment = metaPayment || paymentHeader;
+
+        try {
+          const result = await callTool(name, args || {}, effectivePayment);
+
+          if (result?.error === 'payment_required') {
+            return jsonrpc(id, {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'payment_required',
+                  message: result.message,
+                  payment_info: result.payment_info,
+                  payment_required_header: result.paymentRequired,
+                  instructions: [
+                    '1. Decode the payment_required_header (base64) to get payment details',
+                    '2. Sign an EIP-3009 TransferWithAuthorization for the required USDC amount',
+                    '3. Encode the signature as the x-payment header',
+                    '4. Retry the tool call with _meta.payment set to the signed header',
+                    'See https://x402.org for the x402 payment protocol spec',
+                  ],
+                }, null, 2),
+              }],
+              isError: true,
+            });
+          } else if (result?.error) {
+            return jsonrpc(id, {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+              isError: true,
+            });
+          } else {
+            return jsonrpc(id, {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            });
+          }
+        } catch (e) {
+          return jsonrpcError(id, -32000, e.message);
+        }
+      }
+
+      case 'notifications/initialized':
+      case 'notifications/cancelled':
+        return null; // Notifications — no response
+
+      default:
+        return jsonrpcError(id, -32601, `Method not found: ${method}`);
+    }
+  } catch (e) {
+    return jsonrpcError(id, -32603, 'Internal error', e.message);
+  }
+}
+
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
 
 app.get('/mcp/info', (req, res) => {
@@ -325,110 +407,21 @@ app.get('/mcp/info', (req, res) => {
 // MCP Streamable HTTP: POST for client→server messages
 app.post('/mcp', async (req, res) => {
   const body = req.body;
-
-  // Support batch (array) or single message
   const messages = Array.isArray(body) ? body : [body];
-  const responses = [];
-
-  // Forward x-payment header from MCP request meta or HTTP header
   const paymentHeader = req.headers['x-payment'];
 
+  const responses = [];
   for (const msg of messages) {
-    const { jsonrpc: ver, id, method, params } = msg;
-
-    if (ver !== '2.0') {
-      responses.push(jsonrpcError(id, -32600, 'Invalid JSON-RPC version'));
-      continue;
+    // Set session header on initialize
+    if (msg.method === 'initialize') {
+      res.setHeader('mcp-session-id', crypto.randomUUID());
     }
-
-    try {
-      switch (method) {
-        case 'initialize': {
-          const sessionId = crypto.randomUUID();
-          sessions.set(sessionId, { created: Date.now() });
-          res.setHeader('mcp-session-id', sessionId);
-          responses.push(jsonrpc(id, {
-            protocolVersion: '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: SERVER_INFO,
-          }));
-          break;
-        }
-
-        case 'tools/list': {
-          responses.push(jsonrpc(id, {
-            tools: TOOLS.map(({ _price, ...t }) => t),
-          }));
-          break;
-        }
-
-        case 'tools/call': {
-          const { name, arguments: args } = params;
-          // Check for payment in params._meta or HTTP header
-          const metaPayment = params._meta?.payment;
-          const effectivePayment = metaPayment || paymentHeader;
-
-          try {
-            const result = await callTool(name, args || {}, effectivePayment);
-
-            if (result?.error === 'payment_required') {
-              // Return payment required as a structured tool result
-              responses.push(jsonrpc(id, {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'payment_required',
-                    message: result.message,
-                    payment_info: result.payment_info,
-                    payment_required_header: result.paymentRequired,
-                    instructions: [
-                      '1. Decode the payment_required_header (base64) to get payment details',
-                      '2. Sign an EIP-3009 TransferWithAuthorization for the required USDC amount',
-                      '3. Encode the signature as the x-payment header',
-                      '4. Retry the tool call with _meta.payment set to the signed header',
-                      'See https://x402.org for the x402 payment protocol spec',
-                    ],
-                  }, null, 2),
-                }],
-                isError: true,
-              }));
-            } else if (result?.error) {
-              responses.push(jsonrpc(id, {
-                content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-                isError: true,
-              }));
-            } else {
-              responses.push(jsonrpc(id, {
-                content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-              }));
-            }
-          } catch (e) {
-            responses.push(jsonrpcError(id, -32000, e.message));
-          }
-          break;
-        }
-
-        case 'notifications/initialized':
-        case 'notifications/cancelled': {
-          // Notifications — no response needed
-          break;
-        }
-
-        default:
-          responses.push(jsonrpcError(id, -32601, `Method not found: ${method}`));
-      }
-    } catch (e) {
-      responses.push(jsonrpcError(id, -32603, 'Internal error', e.message));
-    }
+    const result = await handleMcpMessage(msg, paymentHeader);
+    if (result !== null) responses.push(result);
   }
 
-  // Filter out nulls (notifications with no response)
   const toSend = responses.filter(Boolean);
-
-  if (toSend.length === 0) {
-    return res.status(202).end();
-  }
-
+  if (toSend.length === 0) return res.status(202).end();
   res.json(toSend.length === 1 ? toSend[0] : toSend);
 });
 
@@ -458,7 +451,36 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`Jorkal NFT MCP Server running on port ${PORT}`);
-  console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
-});
+if (!process.stdin.isTTY) {
+  // Stdio transport — used by mcp-proxy and local MCP clients (e.g. Glama inspection)
+  let buf = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', async (chunk) => {
+    buf += chunk;
+    const lines = buf.split('\n');
+    buf = lines.pop(); // Keep incomplete line in buffer
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const msg = JSON.parse(trimmed);
+        const msgs = Array.isArray(msg) ? msg : [msg];
+        for (const m of msgs) {
+          const result = await handleMcpMessage(m, null);
+          if (result !== null) {
+            process.stdout.write(JSON.stringify(result) + '\n');
+          }
+        }
+      } catch {
+        // Ignore non-JSON input
+      }
+    }
+  });
+  process.stdin.on('end', () => process.exit(0));
+} else {
+  // HTTP transport — default mode for Vercel and direct usage
+  app.listen(PORT, () => {
+    console.log(`Jorkal NFT MCP Server running on port ${PORT}`);
+    console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
+  });
+}
