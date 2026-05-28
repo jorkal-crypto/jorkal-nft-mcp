@@ -549,7 +549,9 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-if (!process.stdin.isTTY) {
+// Use HTTP when running on Vercel (VERCEL env var is set), or when stdin is a TTY.
+// Use stdio only when stdin is piped AND we're not on Vercel (e.g. mcp-proxy / Glama).
+if (!process.stdin.isTTY && !process.env.VERCEL) {
   // Stdio transport — used by mcp-proxy and local MCP clients (e.g. Glama inspection)
   let buf = '';
   process.stdin.setEncoding('utf8');
