@@ -2,7 +2,7 @@
  * Jorkal NFT Data MCP Server
  *
  * Implements MCP (Model Context Protocol) over Streamable HTTP transport.
- * Exposes 12 tools backed by the x402 NFT Data API:
+ * Exposes 17 tools backed by the x402 NFT & Crypto Data API:
  *   - nft_floor        — Floor price + listed count for a collection
  *   - nft_listings     — Top 10 cheapest listings
  *   - nft_stats        — Full collection stats
@@ -15,6 +15,11 @@
  *   - token_balance    — SPL token balance (USDC, ORE, etc.)
  *   - eth_balance      — ETH or Base native balance
  *   - token_price      — Solana token price via Jupiter
+ *   - erc20_balance    — ERC-20 token balance (Ethereum/Base)
+ *   - ens_resolve      — ENS name resolve or reverse lookup
+ *   - coin_price       — Multi-coin USD prices (BTC, ETH, SOL, etc.)
+ *   - eth_transaction  — Ethereum/Base transaction details
+ *   - sol_transaction  — Solana transaction details
  *
  * Payment: Each tool call costs a small amount of USDC on Base mainnet
  * via x402. Pass your x-payment header in the MCP request, OR set
@@ -46,8 +51,8 @@ app.use((req, res, next) => {
 
 const SERVER_INFO = {
   name: 'Solana NFT & Crypto Data API',
-  version: '1.1.0',
-  description: 'Real-time Solana NFT market data and crypto balance/price tools — NFT floor prices, listings, collection stats, wallet portfolio, SOL/SPL/ETH balances, and token prices via Jupiter. Powered by x402 micropayments on Base.',
+  version: '1.2.0',
+  description: 'Real-time Solana NFT market data and multi-chain crypto tools — NFT floor prices, listings, collection stats, wallet portfolio, SOL/SPL/ETH/ERC-20 balances, ENS lookups, BTC/ETH/SOL prices, and transaction details. Powered by x402 micropayments on Base.',
 };
 
 const TOOLS = [
@@ -274,6 +279,95 @@ const TOOLS = [
     },
     _price: '$0.001 USDC on Base mainnet',
   },
+  {
+    name: 'erc20_balance',
+    description: 'Get the ERC-20 token balance for any EVM wallet on Ethereum or Base. Use shorthand names (usdc, usdt, dai, weth, wbtc) or any contract address.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: {
+          type: 'string',
+          description: 'EVM wallet address (0x-prefixed)',
+        },
+        contract: {
+          type: 'string',
+          description: 'Token shorthand (usdc, usdt, dai, weth, wbtc) or full contract address (0x...)',
+        },
+        chain: {
+          type: 'string',
+          description: 'Chain: "eth" for Ethereum mainnet, "base" for Base mainnet (default: eth)',
+          enum: ['eth', 'base'],
+        },
+      },
+      required: ['address', 'contract'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
+  {
+    name: 'ens_resolve',
+    description: 'Resolve an ENS name to an Ethereum address (e.g. "vitalik.eth" → 0x...), or reverse-lookup an address to its ENS name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'ENS name (e.g. "vitalik.eth") for forward lookup, or Ethereum address (0x...) for reverse lookup',
+        },
+      },
+      required: ['name'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
+  {
+    name: 'coin_price',
+    description: 'Get current USD prices for multiple cryptocurrencies. Supports BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX, MATIC, LINK, SUI, JUP and more. Use common tickers or full CoinGecko IDs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ids: {
+          type: 'string',
+          description: 'Comma-separated coin IDs or tickers. E.g. "btc,eth,sol" or "bitcoin,ethereum,solana" (default: bitcoin,ethereum,solana)',
+        },
+      },
+      required: [],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
+  {
+    name: 'eth_transaction',
+    description: 'Get details for an Ethereum or Base transaction by hash — from/to addresses, value, gas used, status (success/failed/pending), and block.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        hash: {
+          type: 'string',
+          description: 'Transaction hash (0x-prefixed hex)',
+        },
+        chain: {
+          type: 'string',
+          description: 'Chain: "eth" for Ethereum mainnet, "base" for Base mainnet (default: eth)',
+          enum: ['eth', 'base'],
+        },
+      },
+      required: ['hash'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
+  {
+    name: 'sol_transaction',
+    description: 'Get details for a Solana transaction by signature — slot, block time, status (success/failed), fee in SOL, involved accounts, and program logs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        signature: {
+          type: 'string',
+          description: 'Solana transaction signature (base58)',
+        },
+      },
+      required: ['signature'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
 ];
 
 function jsonrpc(id, result) {
@@ -391,6 +485,36 @@ async function callTool(name, args, paymentHeader) {
       const { mint } = args;
       if (!mint) throw new Error('mint is required');
       const data = await callApi(`/price/token/${encodeURIComponent(mint)}`, paymentHeader);
+      return data;
+    }
+    case 'erc20_balance': {
+      const { address, contract, chain = 'eth' } = args;
+      if (!address) throw new Error('address is required');
+      if (!contract) throw new Error('contract is required');
+      const data = await callApi(`/balance/erc20/${encodeURIComponent(address)}/${encodeURIComponent(contract)}?chain=${chain}`, paymentHeader);
+      return data;
+    }
+    case 'ens_resolve': {
+      const { name } = args;
+      if (!name) throw new Error('name is required');
+      const data = await callApi(`/ens/${encodeURIComponent(name)}`, paymentHeader);
+      return data;
+    }
+    case 'coin_price': {
+      const { ids = 'bitcoin,ethereum,solana' } = args;
+      const data = await callApi(`/price/coins?ids=${encodeURIComponent(ids)}`, paymentHeader);
+      return data;
+    }
+    case 'eth_transaction': {
+      const { hash, chain = 'eth' } = args;
+      if (!hash) throw new Error('hash is required');
+      const data = await callApi(`/tx/eth/${encodeURIComponent(hash)}?chain=${chain}`, paymentHeader);
+      return data;
+    }
+    case 'sol_transaction': {
+      const { signature } = args;
+      if (!signature) throw new Error('signature is required');
+      const data = await callApi(`/tx/sol/${encodeURIComponent(signature)}`, paymentHeader);
       return data;
     }
     default:
