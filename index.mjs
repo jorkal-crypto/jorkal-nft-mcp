@@ -2,7 +2,7 @@
  * Jorkal NFT Data MCP Server
  *
  * Implements MCP (Model Context Protocol) over Streamable HTTP transport.
- * Exposes 8 tools backed by the x402 NFT Data API:
+ * Exposes 12 tools backed by the x402 NFT Data API:
  *   - nft_floor        — Floor price + listed count for a collection
  *   - nft_listings     — Top 10 cheapest listings
  *   - nft_stats        — Full collection stats
@@ -11,6 +11,10 @@
  *   - wallet_nfts      — NFTs owned by a Solana wallet
  *   - wallet_activity  — Wallet transaction history
  *   - wallet_value     — Estimated portfolio value
+ *   - sol_balance      — SOL balance for a Solana wallet
+ *   - token_balance    — SPL token balance (USDC, ORE, etc.)
+ *   - eth_balance      — ETH or Base native balance
+ *   - token_price      — Solana token price via Jupiter
  *
  * Payment: Each tool call costs a small amount of USDC on Base mainnet
  * via x402. Pass your x-payment header in the MCP request, OR set
@@ -41,9 +45,9 @@ app.use((req, res, next) => {
 // ── MCP Protocol Helpers ───────────────────────────────────────────────────────
 
 const SERVER_INFO = {
-  name: 'Solana NFT Data API',
-  version: '1.0.0',
-  description: 'Real-time Solana NFT market data via Magic Eden — floor prices, listings, collection stats, recent activity, token details, and wallet portfolio analysis. Powered by x402 micropayments on Base.',
+  name: 'Solana NFT & Crypto Data API',
+  version: '1.1.0',
+  description: 'Real-time Solana NFT market data and crypto balance/price tools — NFT floor prices, listings, collection stats, wallet portfolio, SOL/SPL/ETH balances, and token prices via Jupiter. Powered by x402 micropayments on Base.',
 };
 
 const TOOLS = [
@@ -201,6 +205,75 @@ const TOOLS = [
     },
     _price: '$0.010 USDC on Base mainnet',
   },
+  {
+    name: 'sol_balance',
+    description: 'Get the SOL balance for any Solana wallet address. Returns the balance in both lamports (raw) and SOL (human-readable).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: {
+          type: 'string',
+          description: 'Solana wallet address (base58)',
+        },
+      },
+      required: ['address'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
+  {
+    name: 'token_balance',
+    description: 'Get the SPL token balance for a Solana wallet. Works for any SPL token including USDC (EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v), ORE, and others. Returns raw amount, decimals, and human-readable balance.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: {
+          type: 'string',
+          description: 'Solana wallet address (base58)',
+        },
+        mint: {
+          type: 'string',
+          description: 'SPL token mint address (base58). E.g. USDC: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        },
+      },
+      required: ['address', 'mint'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
+  {
+    name: 'eth_balance',
+    description: 'Get the native ETH or Base balance for an EVM wallet address. Supports both Ethereum mainnet and Base mainnet.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: {
+          type: 'string',
+          description: 'EVM wallet address (0x-prefixed hex)',
+        },
+        chain: {
+          type: 'string',
+          description: 'Chain to query: "eth" for Ethereum mainnet, "base" for Base mainnet (default: "eth")',
+          enum: ['eth', 'base'],
+        },
+      },
+      required: ['address'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
+  {
+    name: 'token_price',
+    description: 'Get the current USD price for any Solana token by its mint address. Uses Jupiter Price API. Works for SOL, USDC, ORE, JUP, and thousands of other Solana tokens.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mint: {
+          type: 'string',
+          description: 'Solana token mint address (base58). E.g. SOL: So11111111111111111111111111111111111111112, USDC: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        },
+      },
+      required: ['mint'],
+    },
+    _price: '$0.001 USDC on Base mainnet',
+  },
 ];
 
 function jsonrpc(id, result) {
@@ -293,6 +366,31 @@ async function callTool(name, args, paymentHeader) {
       const { address } = args;
       if (!address) throw new Error('address is required');
       const data = await callApi(`/wallet/${encodeURIComponent(address)}/value`, paymentHeader);
+      return data;
+    }
+    case 'sol_balance': {
+      const { address } = args;
+      if (!address) throw new Error('address is required');
+      const data = await callApi(`/balance/sol/${encodeURIComponent(address)}`, paymentHeader);
+      return data;
+    }
+    case 'token_balance': {
+      const { address, mint } = args;
+      if (!address) throw new Error('address is required');
+      if (!mint) throw new Error('mint is required');
+      const data = await callApi(`/balance/spl/${encodeURIComponent(address)}/${encodeURIComponent(mint)}`, paymentHeader);
+      return data;
+    }
+    case 'eth_balance': {
+      const { address, chain = 'eth' } = args;
+      if (!address) throw new Error('address is required');
+      const data = await callApi(`/balance/eth/${encodeURIComponent(address)}?chain=${chain}`, paymentHeader);
+      return data;
+    }
+    case 'token_price': {
+      const { mint } = args;
+      if (!mint) throw new Error('mint is required');
+      const data = await callApi(`/price/token/${encodeURIComponent(mint)}`, paymentHeader);
       return data;
     }
     default:
